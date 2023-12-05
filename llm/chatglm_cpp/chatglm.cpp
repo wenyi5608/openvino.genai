@@ -41,6 +41,8 @@ static double get_duration_ms_until_now(Time::time_point& startTime) {
 
 }
 
+#define COMPILE_FROM_XML 1
+
 int main(int argc, char* argv[]) try {
     if (argc != 6) {
         throw std::runtime_error(std::string{"Usage: "} + argv[0] + " <openvino_model.xml> <tokenizer.xml> <detokenizer.xml> '<device>' '<prompt>'");
@@ -53,8 +55,11 @@ int main(int argc, char* argv[]) try {
     auto input_ids = tokenizer.get_tensor("input_ids");
     auto attention_mask = tokenizer.get_tensor("attention_mask");
     ov::InferRequest detokenizer = core.compile_model(argv[3], "CPU").create_infer_request();
-    std::shared_ptr<ov::Model> model = core.read_model(argv[1]);
     constexpr size_t BATCH_SIZE = 1;
+
+#if !COMPILE_FROM_XML
+
+    std::shared_ptr<ov::Model> model = core.read_model(argv[1]);
     std::map<size_t, ov::PartialShape> shapes = {
         {0, ov::PartialShape{
             BATCH_SIZE, -1
@@ -63,13 +68,12 @@ int main(int argc, char* argv[]) try {
             BATCH_SIZE, -1
         }},
         {2, ov::PartialShape{
-	    BATCH_SIZE, -1
+	        BATCH_SIZE, -1
         }}
     };
 
     
     std::vector<ov::Output<ov::Node>> inputs = model->inputs();
-    
     for (size_t idx = 3; idx < inputs.size(); ++idx) {
         ov::PartialShape shape = inputs.at(idx).get_partial_shape();
         shape[1] = BATCH_SIZE;
@@ -77,26 +81,49 @@ int main(int argc, char* argv[]) try {
     }
 
     model->reshape(shapes);
+#endif
     //ov::InferRequest ireq = core.compile_model(model, "CPU", ov::cache_dir("llm-cache")).create_infer_request();
     double total_time = 0;
     int count = 0;
     auto startTime = Time::now();
-    ov::InferRequest ireq = core.compile_model(model, argv[4]).create_infer_request();
+#if !COMPILE_FROM_XML
+    ov::InferRequest ireq = core.compile_model(model, argv[4], ov::cache_dir("llm-cache")).create_infer_request();
+    model = nullptr;
+#else
+    ov::CompiledModel compilemodel = core.compile_model(argv[1], argv[4], ov::cache_dir("llm-cache"));
+    ov::InferRequest ireq = compilemodel.create_infer_request();
+    auto inputs = compilemodel.inputs();
+#endif
     auto duration_ms = get_duration_ms_until_now(startTime);
     std::cout << "Compile LLM model took " << duration_ms << " ms" << std::endl;
-    
+   
     for (std::string input_text : sentences) {
-        std::cout << " #### sentence: index " << input_text << std::endl;
         total_time = 0;
         count = 0;
-        tokenize(tokenizer, input_text);
+        auto prompt_text ="<|user|> " + input_text + " <|assitant|>";
+        std::cout << " #### sentence: index " << prompt_text << std::endl;
+        tokenize(tokenizer, prompt_text);
         input_ids = tokenizer.get_tensor("input_ids");
         attention_mask = tokenizer.get_tensor("attention_mask");
-	std::cout << "input lenghth " << input_ids.get_size() << std::endl;
+        std::cout << "input lenghth " << input_ids.get_size() << std::endl;
 
+#if !COMPILE_FROM_XML
         for (size_t idx = 3; idx < inputs.size(); ++idx) {
             ireq.get_input_tensor(idx).set_shape(inputs.at(idx).get_partial_shape().get_min_shape());
         }
+#else
+        for (auto &input : inputs) {
+            for (const std::string& name : input.get_names()) {
+                if (name.rfind("past_key_values", 0) == 0)
+                {
+                    ov::PartialShape shape = input.get_partial_shape().get_min_shape();
+                    shape[1] = BATCH_SIZE;
+                    ireq.get_tensor(input).set_shape(shape.get_shape());
+                    break;
+                }
+            }
+        }
+#endif
 
         ireq.get_tensor("input_ids").set_shape(input_ids.get_shape());  // TODO: replace with ireq.set_tensor("input_ids", input_ids); after it's fixed
         ireq.get_tensor("attention_mask").set_shape(attention_mask.get_shape());
@@ -124,10 +151,21 @@ int main(int argc, char* argv[]) try {
             ireq.get_tensor("attention_mask").set_shape({ BATCH_SIZE, ireq.get_tensor("attention_mask").get_shape()[1] + 1 });
             std::fill_n(ireq.get_tensor("attention_mask").data<int64_t>(), ireq.get_tensor("attention_mask").get_size(), 1);
             ireq.get_tensor("position_ids").data<int64_t>()[0] = ireq.get_tensor("attention_mask").get_size() - 2;
-
+#if !COMPILE_FROM_XML
             for (size_t idx = 3; idx < inputs.size(); ++idx) {
                 ireq.set_input_tensor(idx, ireq.get_output_tensor(idx - 2));
             }
+#else
+            for (auto& input : inputs) {
+                for (const std::string& name : input.get_names()) {
+                    if (name.rfind("past_key_values", 0) == 0)
+                    {
+                        ireq.set_tensor(input, ireq.get_tensor("present" + name.substr(15)));
+                        break;
+                    }
+                }
+            }
+#endif
             ireq.start_async();
             ireq.wait();
             duration_ms = get_duration_ms_until_now(startTime);
