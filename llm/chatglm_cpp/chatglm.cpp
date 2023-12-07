@@ -47,6 +47,9 @@ int main(int argc, char* argv[]) try {
     if (argc != 6) {
         throw std::runtime_error(std::string{"Usage: "} + argv[0] + " <openvino_model.xml> <tokenizer.xml> <detokenizer.xml> '<device>' '<prompt>'");
     }
+	
+    std::cout << ov::get_openvino_version() << std::endl;
+	
     ov::Core core;
     core.add_extension(USER_OV_EXTENSIONS_PATH);  // USER_OV_EXTENSIONS_PATH is defined in root CMakeLists.txt
     //auto [input_ids, attention_mask] = tokenize(core.compile_model(argv[2], "CPU").create_infer_request(), argv[4]);
