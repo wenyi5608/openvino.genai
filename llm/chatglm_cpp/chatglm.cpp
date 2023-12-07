@@ -44,8 +44,8 @@ static double get_duration_ms_until_now(Time::time_point& startTime) {
 #define COMPILE_FROM_XML 1
 
 int main(int argc, char* argv[]) try {
-    if (argc != 6) {
-        throw std::runtime_error(std::string{"Usage: "} + argv[0] + " <openvino_model.xml> <tokenizer.xml> <detokenizer.xml> '<device>' '<prompt>'");
+    if (argc != 5) {
+        throw std::runtime_error(std::string{"Usage: "} + argv[0] + " <openvino_model.xml> <tokenizer.xml> <detokenizer.xml> '<device>' ");
     }
 	
     std::cout << ov::get_openvino_version() << std::endl;
@@ -54,7 +54,6 @@ int main(int argc, char* argv[]) try {
     core.add_extension(USER_OV_EXTENSIONS_PATH);  // USER_OV_EXTENSIONS_PATH is defined in root CMakeLists.txt
     //auto [input_ids, attention_mask] = tokenize(core.compile_model(argv[2], "CPU").create_infer_request(), argv[4]);
     ov::InferRequest tokenizer = core.compile_model(argv[2], "CPU").create_infer_request();
-    tokenize(tokenizer, argv[5]);
     auto input_ids = tokenizer.get_tensor("input_ids");
     auto attention_mask = tokenizer.get_tensor("attention_mask");
     ov::InferRequest detokenizer = core.compile_model(argv[3], "CPU").create_infer_request();
@@ -75,7 +74,6 @@ int main(int argc, char* argv[]) try {
         }}
     };
 
-    
     std::vector<ov::Output<ov::Node>> inputs = model->inputs();
     for (size_t idx = 3; idx < inputs.size(); ++idx) {
         ov::PartialShape shape = inputs.at(idx).get_partial_shape();
