@@ -8,6 +8,12 @@
 #include <openvino_extensions/strings.hpp>
 #include <openvino/runtime/properties.hpp>
 #include "openvino/runtime/intel_gpu/properties.hpp"
+#include "openvino/op/ops.hpp"
+#include "openvino/opsets/opset13.hpp"
+#include "openvino/pass/graph_rewrite.hpp"
+#include "openvino/pass/manager.hpp"
+#include "openvino/pass/pattern/matcher.hpp"
+#include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "openvino/pass/serialize.hpp"
 #include "sampling.hpp"
 
@@ -40,12 +46,13 @@ struct Args {
     std::string token_model_path = "tokenizer.xml";
     std::string detoken_model_path = "detokenizer.xml";
     std::string device = "GPU";
-    bool convert_kv_fp16 = false;
+    bool reduce_logits = false;
     bool do_sample = false;
     int top_k = 0;
     float top_p = 0.7;
     float temp = 0.95;
     float repeat_penalty = 1.0;
+    int output_fixed_len = 0;
 };
 
 static void usage(const std::string& prog) {
@@ -57,12 +64,13 @@ static void usage(const std::string& prog) {
         << "  -token PATH             Tokenizer model path (default: tokenizer.xml)\n"
         << "  -detoken PATH           DeTokenizer model path (default: detokenizer.xml)\n"
         << "  -d, --device            Device (default: GPU)\n"
-        << "  --convert_kv_fp16       Convert kvcache fp16 (default: False)\n"
+        << "  --reduce_logits         Reduce_logits (default: False)\n"
         << "  --do_sample             Search (default: False)\n"
         << "  --top_k N               top-k sampling (default: 0)\n"
         << "  --top_p N               top-p sampling (default: 0.7)\n"
         << "  --temp N                temperature (default: 0.95)\n"
-        << "  --repeat_penalty N      penalize repeat sequence of tokens (default: 1.0, 1.0 = disabled)\n";
+        << "  --repeat_penalty N      penalize repeat sequence of tokens (default: 1.0, 1.0 = disabled)\n"
+        << "  --output_fixed_len N    set output fixed lenth (default: 0, output lenth is determined by the model)\n";
 }
 
 static Args parse_args(const std::vector<std::string>& argv) {
@@ -87,8 +95,8 @@ static Args parse_args(const std::vector<std::string>& argv) {
         else if (arg == "-d" || arg == "--device") {
             args.device = argv[++i];
         }
-        else if (arg == "--convert_kv_fp16") {
-            args.convert_kv_fp16 = true;
+        else if (arg == "--reduce_logits") {
+            args.reduce_logits = true;
         }
         else if (arg == "--do_sample") {
             args.do_sample = true;
@@ -104,6 +112,9 @@ static Args parse_args(const std::vector<std::string>& argv) {
         }
         else if (arg == "--repeat_penalty") {
             args.repeat_penalty = std::stof(argv[++i]);
+        }
+        else if (arg == "--output_fixed_len") {
+            args.output_fixed_len = std::stoi(argv[++i]);
         }
         else {
             std::cerr << "Unknown argument: " << arg << std::endl;
@@ -209,6 +220,106 @@ static double get_duration_ms_until_now(Time::time_point& startTime) {
     return std::chrono::duration_cast<ns>(Time::now() - startTime).count() * 0.000001;
 }
 
+/*@brief Insert slice transformation matches following graph, start from logits (Results) to search along root->parent-> grandparent node,
+ * then insert slice between Reshape (grandparent node) and Matmul to keep only last dim of matmul first input, first input shape reduced
+ * from [1, seq_len, 4096] to [1, 1,4096]. Therefore, after graph transformation, we can reduce matmul computation
+ * from [1, seq_len, 4096] * [1, 4096, 151936] = [1, seq_len, 151936] to [1,1,4096]*[4096,151936] = [1,1,151936]
+ *
+ * Original graph
+ *         +----------+            +----------+
+ *         |  Reshape |            | Constant |
+ *         +----------+            +----------+
+ *              |                       |
+ *              -----------    ----------
+ *                        |    |
+ *                        v    v
+ *                      +--------+
+ *                      | MatMul |
+ *                      +--------+
+ *                          |
+ *                          v
+ *                     +----------+
+ *                     |  logits  |
+ *                     +----------+
+ *
+ * Modified graph after insert slice:
+ *
+ *         +----------+            +----------+
+ *         |  Reshape |            | Constant |
+ *         +----------+            +----------+
+ *              |                       |
+ *         +----------+                 |
+ *         |  Slice   |                 |
+ *         +----------+                 |
+ *              |                       |
+ *              -----------    ----------
+ *                        |    |
+ *                        v    v
+ *                      +--------+
+ *                      | MatMul |
+ *                      +--------+
+ *                          |
+ *                          v
+ *                     +----------+
+ *                     |  logits  |
+ *                     +----------+
+*/
+
+class InsertSlice : public ov::pass::MatcherPass {
+public:
+    OPENVINO_RTTI("InsertSlice", "0");
+    explicit InsertSlice() {
+        auto label = ov::pass::pattern::wrap_type<ov::op::v0::Result>();
+        ov::matcher_pass_callback callback = [=](ov::pass::pattern::Matcher& m) {
+            auto root = std::dynamic_pointer_cast<ov::op::v0::Result>(m.get_match_root());
+            if (!root) {
+                return false;
+            }
+            std::string root_name = root->get_friendly_name();
+            if (root->get_output_partial_shape(0).size() == 3) {
+                std::cout << "Find target root node name: " << root_name << "\n";
+                auto parent = root->input_value(0).get_node_shared_ptr();
+                std::cout << "Find parent node name: " << parent->get_friendly_name() << "\n";
+                auto grand_parent1 = parent->input_value(0).get_node_shared_ptr();
+                std::cout << "Find grandparent1 node name: " << grand_parent1->get_friendly_name() << "\n";
+
+                auto grand_parent = grand_parent1->input_value(0).get_node_shared_ptr();
+                std::cout << "Find grandparent node name: " << grand_parent->get_friendly_name() << "\n";
+
+                ov::Output<ov::Node> grand_parent_output = grand_parent1->get_input_source_output(0); // parent->get_input_source_output(0);
+                std::set<ov::Input<ov::Node>> consumers = grand_parent_output.get_target_inputs();
+
+                std::vector<int32_t> start_v = { -1, 0, 0 };
+                std::vector<int32_t> stop_v = { -2, 1,4096 };
+                std::vector<int32_t> step_v = { -1, 1, 1 };
+
+                std::cout << "Original reshape node output shape:" << grand_parent_output.get_partial_shape() << std::endl;
+                auto starts = ov::op::v0::Constant::create(ov::element::i32,
+                    ov::Shape{ 3 },
+                    start_v);
+                auto stop = ov::op::v0::Constant::create(ov::element::i32,
+                    ov::Shape{ 3 },
+                    stop_v);
+                auto step = ov::op::v0::Constant::create(ov::element::i32,
+                    ov::Shape{ 3 },
+                    step_v);
+                auto slice = std::make_shared<ov::opset13::Slice>(grand_parent, starts, stop, step); //data, starts, ends, steps
+                std::cout << "After insert slice node, output shape" << slice->output(0).get_partial_shape() << std::endl;
+                for (auto consumer : consumers) {
+                    consumer.replace_source_output(slice->output(0));
+                }
+                register_new_node(slice);
+            }
+
+            return true;
+            };
+        // Register pattern with Parameter operation as a pattern root node
+        auto m = std::make_shared<ov::pass::pattern::Matcher>(label, "InsertSlice");
+        // Register Matcher
+        register_matcher(m, callback);
+    }
+};
+
 }
 
 int main(int argc, char* argv[]) try {
@@ -230,7 +341,7 @@ int main(int argc, char* argv[]) try {
     constexpr size_t BATCH_SIZE = 1;
     size_t convert_model;
 
-    if (args.convert_kv_fp16){
+    if (args.reduce_logits){
         convert_model = 1;
     }
     else {
@@ -257,6 +368,7 @@ int main(int argc, char* argv[]) try {
 
     double total_time = 0;
     int count = 0;
+    double first_time;
     
     // Read OpenVINO Model
     if (1 == convert_model) {
@@ -265,16 +377,11 @@ int main(int argc, char* argv[]) try {
         duration_ms = get_duration_ms_until_now(startTime);
         std::cout << "Read chatglm Model took " << duration_ms << " ms" << std::endl;
 
-        std::vector<ov::Output<ov::Node>> inputs = model->inputs();
+        std::cout << "######## [Model Graph Optimization] Step 2: Insert slice node after reshape to reduce logits operation ########\n";
+        ov::pass::Manager manager;
+        manager.register_pass<InsertSlice>();
+        manager.run_passes(model);
 
-        // Change input past key value and output present key value with FP16
-        ov::preprocess::PrePostProcessor p3(model);
-        for (size_t idx = 3; idx < inputs.size(); ++idx) {
-            p3.input(idx).tensor().set_element_type(ov::element::f16);
-            p3.output(idx - 2).tensor().set_element_type(ov::element::f16);
-        }
-
-        model = p3.build();
         std::string modifiled_file = std::regex_replace(args.ov_model_path, std::regex("openvino_model"), "modified_openvino_model");
         std::cout << "Save modified model in " << modifiled_file << "\n";
         ov::serialize(model, modifiled_file);
@@ -309,48 +416,39 @@ int main(int argc, char* argv[]) try {
         for (size_t idx = 0; idx < input_ids.get_size(); ++idx) {
             output_ids.emplace_back(((int)input_ids.data<const int64_t>()[idx]));
         }
-
-        for (size_t idx = 3; idx < model_inputs.size(); ++idx) {
-            ov::PartialShape shape = model_inputs.at(idx).get_partial_shape().get_min_shape();
-            shape[1] = BATCH_SIZE;
-            ireq.get_input_tensor(idx).set_shape(shape.get_shape());
-        }
-
-        ireq.get_tensor("input_ids").set_shape(input_ids.get_shape());  // TODO: replace with ireq.set_tensor("input_ids", input_ids); after it's fixed
-        ireq.get_tensor("attention_mask").set_shape(attention_mask.get_shape());
-        std::copy_n(input_ids.data<const int64_t>(), input_ids.get_size(), ireq.get_tensor("input_ids").data<int64_t>());
-        std::fill_n(ireq.get_tensor("attention_mask").data<int64_t>(), attention_mask.get_size(), 1);
+        
+        ireq.set_tensor("input_ids", input_ids);
+        ireq.set_tensor("attention_mask", attention_mask);
         ireq.get_tensor("position_ids").set_shape(input_ids.get_shape());
         std::iota(ireq.get_tensor("position_ids").data<int64_t>(), ireq.get_tensor("position_ids").data<int64_t>() + ireq.get_tensor("position_ids").get_size(), 0);
+        ireq.get_tensor("beam_idx").set_shape({ BATCH_SIZE });
+        ireq.get_tensor("beam_idx").data<int32_t>()[0] = 0;
 
         startTime = Time::now();
         ireq.infer();
         duration_ms = get_duration_ms_until_now(startTime);
         std::cout << "First token took " << duration_ms << " ms" << std::endl;
+        first_time = duration_ms;
 
         size_t vocab_size = ireq.get_tensor("logits").get_shape().back();
-        float* logits = ireq.get_tensor("logits").data<float>() + (input_ids.get_size() - 1) * vocab_size;
+
+        float* logits = ireq.get_tensor("logits").data<float>();
+        //float* logits = ireq.get_tensor("logits").data<float>() + (input_ids.get_size() - 1) * vocab_size;
 
         int64_t out_token = get_out_token_id(output_ids, logits, vocab_size, args);
-         output_ids.emplace_back(((int)out_token));
-
-        //int64_t out_token = std::max_element(logits, logits + vocab_size) - logits;
+        output_ids.emplace_back(((int)out_token));
 
         ireq.get_tensor("input_ids").set_shape({ BATCH_SIZE, 1 });
         ireq.get_tensor("position_ids").set_shape({ BATCH_SIZE, 1 });
 
         constexpr int64_t SPECIAL_EOS_TOKEN = 2;  // There's no way to extract the value from the detokenizer for now
-        while (out_token != SPECIAL_EOS_TOKEN) {
+        while (true) {  //(out_token != SPECIAL_EOS_TOKEN)
             startTime = Time::now();
             ireq.get_tensor("input_ids").data<int64_t>()[0] = out_token;
             ireq.get_tensor("attention_mask").set_shape({ BATCH_SIZE, ireq.get_tensor("attention_mask").get_shape()[1] + 1 });
             std::fill_n(ireq.get_tensor("attention_mask").data<int64_t>(), ireq.get_tensor("attention_mask").get_size(), 1);
             ireq.get_tensor("position_ids").data<int64_t>()[0] = ireq.get_tensor("attention_mask").get_size() - 2;
             
-            for (size_t idx = 3; idx < model_inputs.size(); ++idx) {
-                ireq.set_input_tensor(idx, ireq.get_output_tensor(idx - 2));
-            }
-
             ireq.start_async();
             ireq.wait();
             duration_ms = get_duration_ms_until_now(startTime);
@@ -362,11 +460,21 @@ int main(int argc, char* argv[]) try {
 
             out_token = get_out_token_id(output_ids, logits, vocab_size, args);
             output_ids.emplace_back(((int)out_token));
+
+            if (args.output_fixed_len > 0) {
+                if(count >= (args.output_fixed_len - 1))
+                    break;
+            } 
+            else {
+                if (out_token == SPECIAL_EOS_TOKEN) {
+                    break;
+                }
+            }
         }
         std::cout << '\n';
 
         if (count > 0) {
-            std::cout << "Other Avg inference took total " << total_time << " ms token num " << count << " avg " << total_time / (count) << " ms" << std::endl;
+            std::cout << "Other Avg inference took total " << total_time << " ms token num " << count << " first " << first_time << " ms " << " avg " << total_time / (count) << " ms" << std::endl;
         }
     }
 } catch (const std::exception& error) {
