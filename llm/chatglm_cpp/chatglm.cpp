@@ -46,7 +46,7 @@ struct Args {
     std::string token_model_path = "tokenizer.xml";
     std::string detoken_model_path = "detokenizer.xml";
     std::string device = "GPU";
-    bool reduce_logits = false;
+    bool convert_kv_fp16 = false;
     bool do_sample = false;
     int top_k = 0;
     float top_p = 0.7;
@@ -64,7 +64,7 @@ static void usage(const std::string& prog) {
         << "  -token PATH             Tokenizer model path (default: tokenizer.xml)\n"
         << "  -detoken PATH           DeTokenizer model path (default: detokenizer.xml)\n"
         << "  -d, --device            Device (default: GPU)\n"
-        << "  --reduce_logits         Reduce_logits (default: False)\n"
+        << "  --convert_kv_fp16       Reduce_logits (default: False)\n"
         << "  --do_sample             Search (default: False)\n"
         << "  --top_k N               top-k sampling (default: 0)\n"
         << "  --top_p N               top-p sampling (default: 0.7)\n"
@@ -95,8 +95,8 @@ static Args parse_args(const std::vector<std::string>& argv) {
         else if (arg == "-d" || arg == "--device") {
             args.device = argv[++i];
         }
-        else if (arg == "--reduce_logits") {
-            args.reduce_logits = true;
+        else if (arg == "--convert_kv_fp16") {
+            args.convert_kv_fp16 = true;
         }
         else if (arg == "--do_sample") {
             args.do_sample = true;
@@ -341,7 +341,7 @@ int main(int argc, char* argv[]) try {
     constexpr size_t BATCH_SIZE = 1;
     size_t convert_model;
 
-    if (args.reduce_logits){
+    if (args.convert_kv_fp16){
         convert_model = 1;
     }
     else {
