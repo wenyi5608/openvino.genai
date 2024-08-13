@@ -391,7 +391,7 @@ void get_image_embedding(std::vector<std::vector<struct llava_image_embed*>> ima
     embedding.set_input_tensor(input_tensor);
     embedding.infer();
 
-    const ov::Tensor& embed_output_tensor = embedding.get_output_tensor();
+    ov::Tensor& embed_output_tensor = embedding.get_output_tensor();
 
     ov::Shape out_shape = embed_output_tensor.get_shape();
     float* data = embed_output_tensor.data<float>();
@@ -497,7 +497,7 @@ void get_image_embedding(std::vector<std::vector<struct llava_image_embed*>> ima
 
 
 
-ov::Tensor process_prompt(ov::InferRequest& tokenizer, ov::InferRequest& embedding, std::string prompt, bool isAddUser) {
+ov::Tensor process_prompt(ov::InferRequest& tokenizer, ov::InferRequest& embedding, std::string prompt, bool isAddUser, std::vector<int>& output_ids) {
     std::string user_prompt;
     size_t embedding_dim;
     size_t idx;
@@ -514,6 +514,10 @@ ov::Tensor process_prompt(ov::InferRequest& tokenizer, ov::InferRequest& embeddi
 
     auto input_ids = tokenizer.get_tensor("input_ids");
     auto input_len = input_ids.get_size();
+
+    for (idx = 0; idx < input_ids.get_size(); ++idx) {
+        output_ids.emplace_back(((int)input_ids.data<const int64_t>()[idx]));
+    }
 
     ov::Tensor input_tensor = ov::Tensor(ov::element::i64, { 1, input_ids.get_size() }, input_ids.data());
 
@@ -570,6 +574,15 @@ int main(int argc, char* argv[]) try {
     ov::InferRequest detokenizer = core.compile_model(args.detoken_model_path, "CPU").create_infer_request();
     auto duration_ms = get_duration_ms_until_now(startTime);
     std::cout << "Load minicpm tokenizer took " << duration_ms << " ms" << std::endl;
+
+
+    std::string user_prompt = "\n<image></image><slice></slice>";
+    tokenize(tokenizer, (user_prompt).c_str());
+
+    auto kinput_ids = tokenizer.get_tensor("input_ids");
+    auto kinput_len = kinput_ids.get_size();
+    auto kk_data = kinput_ids.data<const int64_t>();
+
 
     unsigned char* image_bytes;
     long image_bytes_length;
@@ -647,13 +660,13 @@ int main(int argc, char* argv[]) try {
         return 0;
     }
 
-    ov::CompiledModel vision_compilemodel = core.compile_model(args.vision_model_path, "CPU"); // "AUTO:GPU,CPU");
+    ov::CompiledModel vision_compilemodel = core.compile_model(args.vision_model_path, "CPU"); // "CPU"); // "AUTO:GPU,CPU");
     ctx_clip->ireq_vision = vision_compilemodel.create_infer_request();
 
     ov::CompiledModel resam_compilemodel = core.compile_model(args.resam_model_path, device);
     ctx_clip->ireq_resampler = resam_compilemodel.create_infer_request();
 
-    ov::CompiledModel embed_compilemodel = core.compile_model(args.embed_model_path, device, device_config);
+    ov::CompiledModel embed_compilemodel = core.compile_model(args.embed_model_path, device);
     ov::InferRequest ireq_embed = embed_compilemodel.create_infer_request();
 
     //Compile model
@@ -687,6 +700,7 @@ int main(int argc, char* argv[]) try {
     size_t embed_lenth;
 
     size_t round = 0;
+    std::vector<int> output_ids;
     std::cout << "please input prompt: " << std::endl;
     while (true) {
         std::string prompt;
@@ -700,6 +714,7 @@ int main(int argc, char* argv[]) try {
 
         if (prompt == "clear") {
             round = 0;
+            output_ids.clear();
             std::cout << "please input prompt:  " << std::endl;
             continue;
         }
@@ -711,7 +726,7 @@ int main(int argc, char* argv[]) try {
             //<用户> + image embedding + prompt + <AI> LLM first input
             std::cout << "first round " << std::endl;
             ov::Tensor promtTensor;
-            promtTensor = process_prompt(tokenizer, ireq_embed, prompt, false);
+            promtTensor = process_prompt(tokenizer, ireq_embed, prompt, false, output_ids);
             
             embed_lenth = img_embed_shape[1] + promtTensor.get_shape()[1];
 
@@ -732,7 +747,7 @@ int main(int argc, char* argv[]) try {
             std::cout << "round index " << round << std::endl;
 
             ov::Tensor promtTensor;
-            promtTensor = process_prompt(tokenizer, ireq_embed, prompt, true);
+            promtTensor = process_prompt(tokenizer, ireq_embed, prompt, true, output_ids);
 
             if ((embed_lenth + promtTensor.get_shape()[1]) > max_lenth) {
                 llm_inputs_embeds.resize((embed_lenth + 256) * img_embed_shape[2]);
@@ -772,7 +787,9 @@ int main(int argc, char* argv[]) try {
         int64_t sequence_len = ireq.get_tensor("logits").get_shape().at(1) - 1;
         size_t vocab_size = ireq.get_tensor("logits").get_shape().back();
         float* logits = ireq.get_tensor("logits").data<float>() + sequence_len * vocab_size;
-        int64_t out_token = std::max_element(logits, logits + vocab_size) - logits;
+        //int64_t out_token = std::max_element(logits, logits + vocab_size) - logits;
+        int64_t out_token = get_out_token_id(output_ids, logits, vocab_size, args);
+        output_ids.emplace_back(((int)out_token));
 
         ireq.get_tensor("inputs_embeds").set_shape({ BATCH_SIZE, 1,  embed_dim });
         ireq.get_tensor("position_ids").set_shape({ BATCH_SIZE, 1 });
@@ -820,7 +837,9 @@ int main(int argc, char* argv[]) try {
             text_streamer.put(out_token);
             logits = ireq.get_tensor("logits").data<float>();
 
-            out_token = std::max_element(logits, logits + vocab_size) - logits;
+            //out_token = std::max_element(logits, logits + vocab_size) - logits;
+            out_token = get_out_token_id(output_ids, logits, vocab_size, args);
+            output_ids.emplace_back(((int)out_token));
 
             if (args.output_fixed_len > 0) {
                 if (count >= (args.output_fixed_len - 1))
