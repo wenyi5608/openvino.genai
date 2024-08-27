@@ -1,5 +1,5 @@
 
-// Copyright (C) 2023 Intel Corporation
+// Copyright (C) 2024 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
 
@@ -551,8 +551,6 @@ static bool get_utf8_line(std::string& line) {
 
 }
 
-
-
 int main(int argc, char* argv[]) try {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -565,8 +563,7 @@ int main(int argc, char* argv[]) try {
 
     ov::Core core;
 
-    core.add_extension(OPENVINO_TOKENIZERS_PATH);  // USER_OV_EXTENSIONS_PATH is defined in root CMakeLists.txt
-    //core.add_extension("D:\\openvino\\runtime\\openvino_tokenizers_windows_2024.4.0.0.dev20240723_x86_64\\runtime\\bin\\intel64\\Release\\openvino_tokenizers.dll");
+    core.add_extension(OPENVINO_TOKENIZERS_PATH);  // OPENVINO_TOKENIZERS_PATH is defined in root CMakeLists.txt
     auto startTime = Time::now();
     ov::InferRequest tokenizer = core.compile_model(args.token_model_path, "CPU").create_infer_request();
     auto input_ids = tokenizer.get_tensor("input_ids");
@@ -589,8 +586,11 @@ int main(int argc, char* argv[]) try {
         ctx_clip->image_mean[i] = 0.5;
         ctx_clip->image_std[i] = 0.5;
     }
-    
 
+    startTime = Time::now();
+    ctx_clip->_pos_embeds = get_2d_sincos_pos_embed(ctx_clip->embed_dim, 70, 70);
+    duration_ms = get_duration_ms_until_now(startTime);
+    std::cout << "get_2d_sincos_pos_embed took " << duration_ms << " ms" << std::endl;
 
     std::string device = args.device;
     constexpr size_t BATCH_SIZE = 1;
