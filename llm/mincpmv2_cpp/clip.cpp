@@ -455,7 +455,118 @@ size_t clip_embd_nbytes(const struct clip_ctx * ctx) {
 }
 
 
+ov::Tensor concatenate(const ov::Tensor& first, const ov::Tensor& second) {
+    size_t res_d_0 = first.get_shape().at(0);
+    size_t res_d_1 = first.get_shape().at(1);
+    size_t res_d_2 = first.get_shape().at(2) * 2;
+    ov::Tensor res{ first.get_element_type(), {res_d_0, res_d_1, res_d_2} };
+    float* first_data = first.data<float>();
+    float* second_data = second.data<float>();
+    float* res_data = res.data<float>();
+    for (size_t i = 0; i < res_d_0; ++i) {
+        for (size_t j = 0; j < res_d_1; ++j) {
+            size_t k = 0;
+            for (; k < first.get_shape().at(2); ++k) {
+                res_data[i * res_d_1 * res_d_2 + j * res_d_2 + k]
+                    = first_data[i * res_d_1 * first.get_shape().at(2) + j * first.get_shape().at(2) + k];
+            }
+            for (size_t l = 0; l < second.get_shape().at(2); ++l, ++k) {
+                res_data[i * res_d_1 * res_d_2 + j * res_d_2 + k]
+                    = second_data[i * res_d_1 * second.get_shape().at(2) + j * second.get_shape().at(2) + l];
+            }
+        }
+    }
+    return res;
+}
 
+/// embed_dim: output dimension for each position
+/// pos: a list of positions to be encoded: size (H, W)
+/// out: (H, W, D)
+ov::Tensor get_1d_sincos_pos_embed_from_grid_new(size_t embed_dim, const ov::Tensor& pos) {
+    OPENVINO_ASSERT(embed_dim % 2 == 0);
+    OPENVINO_ASSERT(pos.get_shape().size() == 3);
+    OPENVINO_ASSERT(pos.get_shape().at(0) == 1);
+    size_t d0 = pos.get_shape().at(1);
+    size_t d1 = pos.get_shape().at(2);
+    size_t d2 = embed_dim / 2;
+    std::vector<float> omega(d2);
+    for (size_t idx = 0; idx < omega.size(); ++idx) {
+        omega.at(idx) = idx / (embed_dim / 2.0);
+        omega.at(idx) = 1.0 / std::pow(10000, omega.at(idx));  // (D/2,)
+    }
+    const float* const pos_data = pos.data<float>();
+    ov::Tensor out(ov::element::f32, { d0, d1, d2 });  // (H, W, D/2), outer product
+    float* out_data = out.data<float>();
+    for (size_t i = 0; i < d0; ++i) {
+        for (size_t j = 0; j < d1; ++j) {
+            for (size_t k = 0; k < d2; ++k) {
+                out_data[i * d1 * d2 + j * d2 + k]
+                    = pos_data[i * d1 + j] * omega[k];
+            }
+        }
+    }
+
+    ov::Tensor emb_sin{ out.get_element_type(), out.get_shape() };  // (H, W, D/2)
+    float* emb_sin_data = emb_sin.data<float>();
+    std::transform(out_data, out_data + out.get_size(), emb_sin_data, [](float arg) {
+        return std::sin(arg);
+        });
+    ov::Tensor emb_cos{ out.get_element_type(), out.get_shape() };  // (H, W, D/2)
+    float* emb_cos_data = emb_cos.data<float>();
+    std::transform(out_data, out_data + out.get_size(), emb_cos_data, [](float arg) {
+        return std::cos(arg);
+        });
+    return concatenate(emb_sin, emb_cos); // (H, W, D)
+}
+
+ov::Tensor get_2d_sincos_pos_embed_from_grid(size_t embed_dim, const ov::Tensor& grid) {
+    OPENVINO_ASSERT(embed_dim % 2 == 0);
+
+    // use half of dimensions to encode grid_h
+    ov::Coordinate begin_h{ 0, 0, 0 };
+    ov::Coordinate end_h{ grid.get_shape() };
+    end_h.at(0) = 1;
+    ov::Coordinate begin_w{ 1, 0, 0 };
+    ov::Coordinate end_w{ grid.get_shape() };
+    end_w.at(0) = 2;
+    ov::Tensor emb_h = get_1d_sincos_pos_embed_from_grid_new(embed_dim / 2, ov::Tensor{ grid, begin_h, end_h });  // (H, W, D/2)
+    ov::Tensor emb_w = get_1d_sincos_pos_embed_from_grid_new(embed_dim / 2, ov::Tensor{ grid, begin_w, end_w });  // (H, W, D/2)
+
+    ov::Shape emb_h_shape = emb_h.get_shape();
+
+    return concatenate(emb_h, emb_w);
+}
+
+ov::Tensor get_2d_sincos_pos_embed(size_t embed_dim, size_t grid_h, size_t grid_w) {
+    size_t grid_h_size = grid_h, grid_w_size = grid_w;
+    ov::Tensor grid(ov::element::f32, { 2, grid_h_size, grid_w_size });
+    float* data = grid.data<float>();
+
+    for (size_t y = 0; y < grid_h_size; ++y) {
+        std::iota(data, data + grid_w_size, 0);
+        data += grid_w_size;
+    }
+
+    for (size_t y = 0; y < grid_h_size; ++y) {
+        std::fill(data, data + grid_w_size, y);
+        data += grid_w_size;
+    }
+
+    ov::Shape grid_shape = grid.get_shape();
+
+    return get_2d_sincos_pos_embed_from_grid(embed_dim, grid);
+}
+
+void set_2d_pos_cache(struct clip_ctx* ctx) {
+    ctx->_pos_embeds = get_2d_sincos_pos_embed(ctx->embed_dim, ctx->pos_max_size, ctx->pos_max_size);
+}
+
+void adjust_pos_cache(struct clip_ctx* ctx, size_t target_size_h, size_t target_size_w) {
+    if (target_size_h > ctx->pos_max_size || target_size_w > ctx->pos_max_size) {
+        set_2d_pos_cache(ctx);
+        ctx->pos_max_size = std::max(target_size_h, target_size_w);
+    }
+}
 
 bool clip_image_encode(struct clip_ctx* ctx, const int n_threads, clip_image_f32* img, float* vec, std::pair<int, int> load_image_size = { 448, 448 }) {
     //if (!ctx->has_vision_encoder) {
@@ -495,11 +606,35 @@ bool clip_image_batch_encode(clip_ctx* ctx, const int n_threads, const clip_imag
     ov::Shape out_shape = vision_output_tensor.get_shape();
     float *data = vision_output_tensor.data<float>();
 
+    size_t bs = 1;
+    size_t target_h = image_size_height / patch_size;
+    size_t target_w = image_size_width / patch_size;
+    adjust_pos_cache(ctx, target_h, target_w);
+    size_t max_patch_len = target_h * target_w;
+    ov::Tensor key_padding_mask(ov::element::boolean, { 1, max_patch_len });
+    bool* mask_data = key_padding_mask.data<bool>();
+    size_t embed_len = ctx->_pos_embeds.get_shape().at(2);
+    ov::Tensor pos_embed(ov::element::f32, { max_patch_len, 1, embed_len });  // BLD => L * B * D
+    float* pos_embed_data = pos_embed.data<float>();
+    float* _pos_embed_data = ctx->_pos_embeds.data<float>();
+    size_t _d0 = ctx->_pos_embeds.get_shape().at(0);
+    size_t _d1 = ctx->_pos_embeds.get_shape().at(1);
+    for (size_t h_idx = 0; h_idx < target_h; ++h_idx) {
+        for (size_t w_idx = 0; w_idx < target_w; ++w_idx) {
+            std::copy_n(
+                _pos_embed_data + (h_idx * _d1 + w_idx) * embed_len,
+                embed_len,
+                pos_embed_data + (h_idx * target_w + w_idx) * bs * embed_len
+            );
+        }
+    }
+
+    std::fill_n(mask_data, max_patch_len, false);
+ 
     //Resampler inference with OpenVINO
     ctx->ireq_resampler.set_tensor("x", vision_output_tensor);
-    ctx->ireq_resampler.get_tensor("tgt_size").set_shape({ 1, 1 });
-    ctx->ireq_resampler.get_tensor("tgt_size").data<int64_t>()[0] = image_size_height / patch_size;
-    ctx->ireq_resampler.get_tensor("tgt_size").data<int64_t>()[1] = image_size_width / patch_size;
+    ctx->ireq_resampler.set_tensor("pos_embed", pos_embed);
+    ctx->ireq_resampler.set_tensor("key_padding_mask", key_padding_mask);
 
     ctx->ireq_resampler.infer();
     //ctx->ireq_resampler.start_async();
