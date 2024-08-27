@@ -43,6 +43,9 @@ struct clip_ctx {
 
     ov::InferRequest ireq_vision;
     ov::InferRequest ireq_resampler;
+    size_t embed_dim = 2304;
+    ov::Tensor _pos_embeds;
+    size_t pos_max_size = 70;
 };
 
 // RGB uint8 image
@@ -102,5 +105,6 @@ CLIP_API bool clip_image_preprocess(struct clip_ctx* ctx, const struct clip_imag
 CLIP_API bool clip_image_encode(struct clip_ctx* ctx, int n_threads, struct clip_image_f32* img, float* vec, std::pair<int, int> load_image_size);
 CLIP_API bool clip_image_batch_encode(struct clip_ctx* ctx, int n_threads, const struct clip_image_f32_batch* imgs, float* vec, std::pair<int, int> load_image_size);
 
+CLIP_API ov::Tensor get_2d_sincos_pos_embed(size_t embed_dim, size_t grid_h, size_t grid_w);
 
 #endif // CLIP_H
