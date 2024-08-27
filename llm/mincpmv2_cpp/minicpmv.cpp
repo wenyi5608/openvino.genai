@@ -249,13 +249,7 @@ std::vector<std::vector<struct llava_image_embed*>> llava_image_embed_make_with_
         return std::vector<std::vector<struct llava_image_embed*>>();
     }
 
-    clip_image_u8* reshaped_image = clip_image_u8_init();
-
-    //resize to 800x800
-    bicubic_resize(*img, *reshaped_image, 800, 800);
-    clip_image_u8_free(img);
-
-    std::vector<std::vector<clip_image_u8*>> imgs = slice_image(reshaped_image);
+    std::vector<std::vector<clip_image_u8*>> imgs = slice_image(img);
     //for (size_t i = 0; i < imgs.size(); ++i) {
     //    for (size_t j = 0; j < imgs[i].size(); ++j) {
     //        LOG_TEE("%s: %d %d\n", __func__, imgs[i][j]->nx, imgs[i][j]->ny);
@@ -270,7 +264,7 @@ std::vector<std::vector<struct llava_image_embed*>> llava_image_embed_make_with_
             int n_image_pos = 0;
             bool image_embed_result = llava_image_embed_make_with_clip_img(ctx_clip, n_threads, imgs[i][j], &image_embed, &n_image_pos);
             if (!image_embed_result) {
-                clip_image_u8_free(reshaped_image);
+                clip_image_u8_free(img);
                 LOG_TEE("%s: coulnd't embed the image\n", __func__);
                 return std::vector<std::vector<struct llava_image_embed*>>();
             }
@@ -281,7 +275,8 @@ std::vector<std::vector<struct llava_image_embed*>> llava_image_embed_make_with_
             results[i].push_back(result);
         }
     }
-    clip_image_u8_free(reshaped_image);
+
+    clip_image_u8_free(img);
     return results;
 }
 
@@ -295,7 +290,4 @@ void llava_image_embed_free_slice(std::vector<std::vector<struct llava_image_emb
     }
     embed = std::vector<std::vector<struct llava_image_embed*>>();
 }
-
-
-
 
