@@ -5,27 +5,23 @@ cmake_minimum_required(VERSION 3.13)  # The requirement comes from thirdparty/op
 project(GenAI)
 
 list(APPEND CUSTOM_OPERATIONS tokenizer)
-add_subdirectory(thirdparty/openvino_contrib/modules/custom_operations/)  # Build user_ov_extensions
+add_subdirectory(thirdparty)  # Build openvino_tokenizers
 if(NOT MSVC)  # # Disable the warning from user_ov_extensions
     target_compile_options(sentencepiece-static PRIVATE -Wno-stringop-overflow)
 endif()
 
-add_subdirectory(llm/cpp)
-target_compile_definitions(llm PRIVATE USER_OV_EXTENSIONS_PATH=\"$<TARGET_FILE:user_ov_extensions>\")
-target_link_libraries(llm PRIVATE user_ov_extensions)
-
 add_subdirectory(llm/chatglm_cpp)
-target_compile_definitions(chatglm PRIVATE USER_OV_EXTENSIONS_PATH=\"$<TARGET_FILE:user_ov_extensions>\")
-target_link_libraries(chatglm PRIVATE user_ov_extensions)
+target_compile_definitions(chatglm PRIVATE OPENVINO_TOKENIZERS_PATH=\"$<TARGET_FILE:openvino_tokenizers>\")
+target_link_libraries(chatglm PRIVATE openvino_tokenizers)
 
 add_subdirectory(llm/llama_cpp)
-target_compile_definitions(llama PRIVATE USER_OV_EXTENSIONS_PATH=\"$<TARGET_FILE:user_ov_extensions>\")
-target_link_libraries(llama PRIVATE user_ov_extensions)
+target_compile_definitions(llama PRIVATE OPENVINO_TOKENIZERS_PATH=\"$<TARGET_FILE:openvino_tokenizers>\")
+target_link_libraries(llama PRIVATE openvino_tokenizers)
 
 add_subdirectory(llm/minicpm_cpp)
-target_compile_definitions(minicpm PRIVATE USER_OV_EXTENSIONS_PATH=\"$<TARGET_FILE:user_ov_extensions>\")
-target_link_libraries(minicpm PRIVATE user_ov_extensions)
+target_compile_definitions(minicpm PRIVATE OPENVINO_TOKENIZERS_PATH=\"$<TARGET_FILE:openvino_tokenizers>\")
+target_link_libraries(minicpm PRIVATE openvino_tokenizers)
 
 add_subdirectory(llm/minicpm_longtest)
-target_compile_definitions(minicpm_longtest PRIVATE USER_OV_EXTENSIONS_PATH=\"$<TARGET_FILE:user_ov_extensions>\")
-target_link_libraries(minicpm_longtest PRIVATE user_ov_extensions)
+target_compile_definitions(minicpm_longtest PRIVATE OPENVINO_TOKENIZERS_PATH=\"$<TARGET_FILE:openvino_tokenizers>\")
+target_link_libraries(minicpm_longtest PRIVATE openvino_tokenizers)
