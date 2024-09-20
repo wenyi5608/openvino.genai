@@ -364,7 +364,7 @@ int main(int argc, char* argv[]) try {
     std::cout << ov::get_openvino_version() << std::endl;
 	
     ov::Core core;
-    core.add_extension(USER_OV_EXTENSIONS_PATH);  // USER_OV_EXTENSIONS_PATH is defined in root CMakeLists.txt
+    core.add_extension(OPENVINO_TOKENIZERS_PATH);  // OPENVINO_TOKENIZERS_PATH is defined in root CMakeLists.txt
     auto startTime = Time::now();
     ov::InferRequest tokenizer = core.compile_model(args.token_model_path, "CPU").create_infer_request();
     auto input_ids = tokenizer.get_tensor("input_ids");
