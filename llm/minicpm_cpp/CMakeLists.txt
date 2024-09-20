@@ -8,7 +8,7 @@ set_target_properties(minicpm PROPERTIES CXX_STANDARD 17)
 set_target_properties(minicpm PROPERTIES CXX_STANDARD_REQUIRED ON)
 if(MSVC)
     target_compile_options(
-        llama PRIVATE
+        minicpm PRIVATE
         /Wall  # Display all warnings
         /wd4710 /wd4711  # Disable the inline warnings
         /EHsc  # Enable standard C++ stack unwinding, assume functions with extern "C" never throw
