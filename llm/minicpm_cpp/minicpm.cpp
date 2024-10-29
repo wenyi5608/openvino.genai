@@ -22,6 +22,11 @@
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
+#include <stdlib.h>
+#include <psapi.h>
+#pragma comment(lib,"psapi.lib") //PrintMemoryInfo
+#include <stdio.h>
+#include "processthreadsapi.h"
 #endif
 
 typedef std::chrono::high_resolution_clock Time;
@@ -358,6 +363,22 @@ public:
 
 }
 
+#ifdef  WIN32
+// To ensure correct resolution of symbols, add Psapi.lib to TARGETLIBS
+// and compile with -DPSAPI_VERSION=1
+static void DebugMemoryInfo(const char* header)
+{
+    PROCESS_MEMORY_COUNTERS_EX2 pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
+    {
+        //The following printout corresponds to the value of Resource Memory, respectively
+        printf("%s:\tCommit \t\t\t=  0x%08X- %u (MB)\n", header, pmc.PrivateUsage, pmc.PrivateUsage / (1024*1024));
+        printf("%s:\tWorkingSetSize\t\t\t=  0x%08X- %u (MB)\n", header, pmc.WorkingSetSize, pmc.WorkingSetSize / (1024 * 1024));
+        printf("%s:\tPrivateWorkingSetSize\t\t\t=  0x%08X- %u (MB)\n", header, pmc.PrivateWorkingSetSize, pmc.PrivateWorkingSetSize / (1024 * 1024));
+    }
+}
+#endif //  WIN32
+
 int main(int argc, char* argv[]) try {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -482,6 +503,10 @@ int main(int argc, char* argv[]) try {
         duration_ms = get_duration_ms_until_now(startTime);
         std::cout << "First token took " << duration_ms << " ms" << std::endl;
         first_time = duration_ms;
+	
+#ifdef  WIN32	
+	DebugMemoryInfo("First token ");
+#endif
 
         int64_t sequence_len = ireq.get_tensor("logits").get_shape().at(1) - 1;
         size_t vocab_size = ireq.get_tensor("logits").get_shape().back();
