@@ -372,7 +372,7 @@ public:
 };
 
 
-void get_image_embedding(std::vector<std::vector<struct llava_image_embed*>> image_embed_slices, ov::InferRequest& tokenizer, ov::InferRequest& embedding, ov::Tensor &imgEmbedding) {
+void get_image_embedding(std::vector<std::vector<struct llava_image_embed*>> image_embed_slices, ov::InferRequest& tokenizer, ov::InferRequest& embedding, ov::Tensor &imgEmbedding, std::vector<int>& img_ids) {
     std::string user_prompt;
     size_t embedding_dim;
     size_t embedding_len = 0;
@@ -385,6 +385,10 @@ void get_image_embedding(std::vector<std::vector<struct llava_image_embed*>> ima
     auto input_ids = tokenizer.get_tensor("input_ids");
     auto input_len = input_ids.get_size();
     embedding_len += input_len;
+
+    for (idx = 0; idx < input_ids.get_size(); ++idx) {
+        img_ids.emplace_back(((int)input_ids.data<const int64_t>()[idx]));
+    }
 
     ov::Tensor input_tensor = ov::Tensor(ov::element::i64, { 1, input_ids.get_size() }, input_ids.data());
 
@@ -455,18 +459,32 @@ void get_image_embedding(std::vector<std::vector<struct llava_image_embed*>> ima
     std::copy(data + embedding_dim * 2, data + embedding_dim * 3, imgEmbedData);
     imgEmbedData += embedding_dim;
 
+    // fill "<image>" token id
+    img_ids.emplace_back(((int)input_ids.data<const int64_t>()[2]));
+
     //fill image_embed_slices[0][0]
     std::copy(image_embed_slices[0][0]->embed, image_embed_slices[0][0]->embed + image_embed_slices[0][0]->n_image_pos * embedding_dim, imgEmbedData);
     imgEmbedData += image_embed_slices[0][0]->n_image_pos * embedding_dim;
+
+    // fill pad token id
+    for (idx = 0; idx < image_embed_slices[0][0]->n_image_pos; idx++) {
+        img_ids.emplace_back(0);
+    }
 
     //fill "</image>" embedding
     std::copy(data + embedding_dim * 3, data + embedding_dim * 4, imgEmbedData);
     imgEmbedData += embedding_dim;
 
+    // fill "</image>" token id
+    img_ids.emplace_back(((int)input_ids.data<const int64_t>()[3]));
+
     if (image_embed_slices.size() > 1) {
         //fill "<slice>" embedding
         std::copy(data + embedding_dim * 4, data + embedding_dim * 5, imgEmbedData);
         imgEmbedData += embedding_dim;
+
+        // fill "<slice>" token id
+        img_ids.emplace_back(((int)input_ids.data<const int64_t>()[4]));
 
         for (size_t i = 1; i < image_embed_slices.size(); ++i) {
             for (size_t j = 0; j < image_embed_slices[i].size(); ++j) {
@@ -474,24 +492,41 @@ void get_image_embedding(std::vector<std::vector<struct llava_image_embed*>> ima
                 std::copy(data + embedding_dim * 2, data + embedding_dim * 3, imgEmbedData);
                 imgEmbedData += embedding_dim;
 
+                // fill "<image>" token id
+                img_ids.emplace_back(((int)input_ids.data<const int64_t>()[2]));
+
                 // fill image_embed_slices[i][j]
                 std::copy(image_embed_slices[i][j]->embed, image_embed_slices[i][j]->embed + image_embed_slices[i][j]->n_image_pos * embedding_dim, imgEmbedData);
                 imgEmbedData += image_embed_slices[i][j]->n_image_pos * embedding_dim;
+
+                // fill pad token id
+                for (idx = 0; idx < image_embed_slices[i][j]->n_image_pos; idx++) {
+                    img_ids.emplace_back(0);
+                }
 
                 //fill "</image>" embedding
                 std::copy(data + embedding_dim * 3, data + embedding_dim * 4, imgEmbedData);
                 imgEmbedData += embedding_dim;
 
+                // fill "</image>" token id
+                img_ids.emplace_back(((int)input_ids.data<const int64_t>()[3]));
+
                 if (j == image_embed_slices[i].size() - 1) {
                     //fill "\n" embedding
                     std::copy(data + embedding_dim, data + embedding_dim * 1, imgEmbedData);
                     imgEmbedData += embedding_dim;
+
+                    // fill "\n" token id
+                    img_ids.emplace_back(((int)input_ids.data<const int64_t>()[1]));
                 }
             }
         }
         //fill "</slice>" embedding
         std::copy(data + embedding_dim * 5, data + embedding_dim * 6, imgEmbedData);
         imgEmbedData += embedding_dim;
+
+        // fill "</slice>" token id
+        img_ids.emplace_back(((int)input_ids.data<const int64_t>()[5]));
     }
 }
 
@@ -651,7 +686,7 @@ int main(int argc, char* argv[]) try {
         return 0;
     }
 
-    ov::CompiledModel vision_compilemodel = core.compile_model(args.vision_model_path, "CPU"); // "CPU"); // "AUTO:GPU,CPU");
+    ov::CompiledModel vision_compilemodel = core.compile_model(args.vision_model_path, device); // "CPU"); // "CPU"); // "AUTO:GPU,CPU");
     ctx_clip->ireq_vision = vision_compilemodel.create_infer_request();
 
     ov::CompiledModel resam_compilemodel = core.compile_model(args.resam_model_path, device);
@@ -676,9 +711,18 @@ int main(int argc, char* argv[]) try {
     std::vector<std::vector<struct llava_image_embed*>> embeds = llava_image_embed_make_with_bytes_slice(ctx_clip, n_threads, image_bytes, image_bytes_length);
     free(image_bytes);
 
+    //image token ids
+    std::vector<int> img_ids;
+    std::vector<int> output_ids;
+
     //get image embedding
     ov::Tensor imgEmbedTensor;
-    get_image_embedding(embeds, tokenizer, ireq_embed, imgEmbedTensor);
+    get_image_embedding(embeds, tokenizer, ireq_embed, imgEmbedTensor, img_ids);
+
+
+    for (int idx = 0; idx < img_ids.size(); idx++) {
+        output_ids.emplace_back(img_ids.at(idx));
+    }
 
     ov::Shape img_embed_shape = imgEmbedTensor.get_shape();
     size_t embed_dim = img_embed_shape[2];
@@ -691,7 +735,7 @@ int main(int argc, char* argv[]) try {
     size_t embed_lenth;
 
     size_t round = 0;
-    std::vector<int> output_ids;
+    
     std::cout << "please input prompt: " << std::endl;
     while (true) {
         std::string prompt;
@@ -705,7 +749,12 @@ int main(int argc, char* argv[]) try {
 
         if (prompt == "clear") {
             round = 0;
+            count = 0;
+            total_time = 0;
             output_ids.clear();
+            for (int idx = 0; idx < img_ids.size(); idx++) {
+                output_ids.emplace_back(img_ids.at(idx));
+            }
             std::cout << "please input prompt:  " << std::endl;
             continue;
         }
