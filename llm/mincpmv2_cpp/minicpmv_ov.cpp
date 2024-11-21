@@ -395,7 +395,7 @@ void get_image_embedding(std::vector<std::vector<struct llava_image_embed*>> ima
     embedding.set_input_tensor(input_tensor);
     embedding.infer();
 
-    ov::Tensor& embed_output_tensor = embedding.get_output_tensor();
+    ov::Tensor embed_output_tensor = embedding.get_output_tensor();
 
     ov::Shape out_shape = embed_output_tensor.get_shape();
     float* data = embed_output_tensor.data<float>();
