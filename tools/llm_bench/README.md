@@ -7,7 +7,7 @@ pip install --upgrade pip
 
 git clone  https://github.com/wenyi5608/openvino.genai.git -b wenyi5608-stateful_token
 cd openvino.genai/tools/llm_bench
-pip install -r requirements.txt  
+pip install -r requirements_2024.5.txt  
 ```
 
 > Note:
