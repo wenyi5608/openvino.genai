@@ -256,7 +256,6 @@ def convert_causal_lm(args):
         and not is_torch_compression(args)
         and is_ov_model_provided(args.model_id, ov_out_dir, precision)
     )
-    breakpoint()
     model_kwargs = {}
     if post_init is not None:
         model_kwargs["torch_dtype"] = torch.float32
