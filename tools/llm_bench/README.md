@@ -82,7 +82,12 @@ optimum-cli export openvino --model meta-llama/Llama-2-7b-chat-hf --weight-forma
 python minicpm_compress.py -m /path/to/fp16/openvino_model.xml -o /path/to/outputdir
 ```
 
-## 3. Additional Resources
+### 3. Compress Model with GPTQ
+```bash
+python minicpm_gptq.py -m /path/to/MiniCPM-1B_ov/openvino_model.xml -o /path/to/MiniCPM-1B_ov/gptq/  --token /path/to/MiniCPM-1B-sft-bf16/ --num_samples 10 --dataset /path/to/dataset.txt
+```
+
+## 4. Additional Resources
 
 - **Error Troubleshooting:** Check the [NOTES.md](./doc/NOTES.md) for solutions to known issues.
 - **Syntax and attributes of prompt file:** Refer to [PROMPT.md](./doc/PROMPT.md) for writing a prompt file.
