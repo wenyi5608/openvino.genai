@@ -345,6 +345,7 @@ public:
                     ov::Shape{ 3 },
                     step_v);
                 auto slice = std::make_shared<ov::opset13::Slice>(grand_parent, starts, stop, step); //data, starts, ends, steps
+		slice->set_friendly_name("inserted_slice");
                 std::cout << "After insert slice node, output shape" << slice->output(0).get_partial_shape() << std::endl;
                 for (auto consumer : consumers) {
                     consumer.replace_source_output(slice->output(0));
