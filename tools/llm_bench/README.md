@@ -87,7 +87,12 @@ python minicpm_compress.py -m /path/to/fp16/openvino_model.xml -o /path/to/outpu
 python minicpm_gptq.py -m /path/to/MiniCPM-1B_ov/openvino_model.xml -o /path/to/MiniCPM-1B_ov/gptq/  --token /path/to/MiniCPM-1B-sft-bf16/ --num_samples 10 --dataset /path/to/dataset.txt
 ```
 
-## 4. Additional Resources
+### 4. Convet Model to reduce_logits Model
+```bash
+python minicpm_reducelogits.py -m /path/to/openvino_model.xml
+```
+
+## 5. Additional Resources
 
 - **Error Troubleshooting:** Check the [NOTES.md](./doc/NOTES.md) for solutions to known issues.
 - **Syntax and attributes of prompt file:** Refer to [PROMPT.md](./doc/PROMPT.md) for writing a prompt file.
