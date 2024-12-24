@@ -1,3 +1,4 @@
+import os
 import argparse
 from pathlib import Path
 
@@ -101,31 +102,63 @@ if __name__ == '__main__':
     LLM_MODEL_OV_INT4_REDUCE_LOGITS = Path(f"{model_path}/modified_openvino_model.xml")
     
     tokenizer = AutoTokenizer.from_pretrained(args.token)
-
     num_samples = int(args.num_samples)
     calibration_data = read_file_to_list(args.dataset, num_samples=num_samples)
 
     cal_data_loader = DataLoader(calibration_data, batch_size=1, shuffle=False)
     calibration_dataset = nncf.Dataset(cal_data_loader, partial(transform_func, tokenizer=tokenizer))
 
-    if not LLM_MODEL_OV_INT4.exists() and LLM_MODEL_OV.exists():
-        compression_configuration = {
-            "mode": nncf.CompressWeightsMode.INT4_SYM,
-            "group_size": 32,
-            "dataset":calibration_dataset,
-            "gptq":True
-            }
-        core = ov.Core()
-        ov_model = core.read_model(LLM_MODEL_OV)
-        ov_compressed_model = nncf.compress_weights(ov_model, **compression_configuration) #, backup_mode=BackupMode.NONE) #, ignored_scope=IgnoredScope(names=["aten::to/Convert"]))
-        ov.save_model(ov_compressed_model, LLM_MODEL_OV_INT4)
+    LLM_MODEL_OV_DIR = os.path.dirname(args.model_file)
+    LLM_MODEL_OV_FP16_REDUCE_LOGITS = Path(f"{LLM_MODEL_OV_DIR}/modified_openvino_model.xml")
+
+    model_reduce_logits = False
+    with open(args.model_file, 'r') as file:
+        for line in file:
+            if "inserted_slice" in line:
+                model_reduce_logits = True
+                break
     
-    if not LLM_MODEL_OV_INT4_REDUCE_LOGITS.exists() and LLM_MODEL_OV_INT4.exists():
-        core = ov.Core()
-        ov_model = core.read_model(LLM_MODEL_OV_INT4)
-        manager = Manager()
-        manager.register_pass(InsertSlice())
-        manager.run_passes(ov_model)
-        ov.save_model(ov_model, LLM_MODEL_OV_INT4_REDUCE_LOGITS)
+    if model_reduce_logits:
+        if not LLM_MODEL_OV_INT4_REDUCE_LOGITS.exists() and LLM_MODEL_OV.exists():
+            print("###### GPTQ: Compress FP16 reduce logits model to INT4 model")
+            compression_configuration = {
+                "mode": nncf.CompressWeightsMode.INT4_SYM,
+                "group_size": 32,
+                "dataset":calibration_dataset,
+                "gptq":True
+                }
+            core = ov.Core()
+            ov_model = core.read_model(LLM_MODEL_OV)
+            ov_compressed_model = nncf.compress_weights(ov_model, **compression_configuration) #, backup_mode=BackupMode.NONE) #, ignored_scope=IgnoredScope(names=["aten::to/Convert"]))
+            ov.save_model(ov_compressed_model, LLM_MODEL_OV_INT4_REDUCE_LOGITS)
+    else:
+        if not LLM_MODEL_OV_INT4.exists() and LLM_MODEL_OV.exists():
+            print("###### GPTQ: Compress FP16 model to INT4 model")
+            compression_configuration = {
+                "mode": nncf.CompressWeightsMode.INT4_SYM,
+                "group_size": 32,
+                "dataset":calibration_dataset,
+                "gptq":True
+                }
+            core = ov.Core()
+            ov_model = core.read_model(LLM_MODEL_OV)
+            ov_compressed_model = nncf.compress_weights(ov_model, **compression_configuration) #, backup_mode=BackupMode.NONE) #, ignored_scope=IgnoredScope(names=["aten::to/Convert"]))
+            ov.save_model(ov_compressed_model, LLM_MODEL_OV_INT4)
+        
+        if not LLM_MODEL_OV_INT4_REDUCE_LOGITS.exists() and LLM_MODEL_OV_INT4.exists():
+            print("###### Convert INT4 model to INT4 reduce logits model")
+            core = ov.Core()
+            ov_model = core.read_model(LLM_MODEL_OV_INT4)
+            manager = Manager()
+            manager.register_pass(InsertSlice())
+            manager.run_passes(ov_model)
+            ov.save_model(ov_model, LLM_MODEL_OV_INT4_REDUCE_LOGITS)
 
-
+        if not LLM_MODEL_OV_FP16_REDUCE_LOGITS.exists() and LLM_MODEL_OV.exists():
+            print("###### Convert FP16 model to FP16 reduce logits model")
+            core = ov.Core()
+            ov_model = core.read_model(LLM_MODEL_OV)
+            manager = Manager()
+            manager.register_pass(InsertSlice())
+            manager.run_passes(ov_model)
+            ov.save_model(ov_model, LLM_MODEL_OV_FP16_REDUCE_LOGITS)
