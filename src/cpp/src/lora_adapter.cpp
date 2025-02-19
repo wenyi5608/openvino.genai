@@ -315,7 +315,22 @@ struct LoRAParametersByWeightGetter {
             if(!std::count_if(weight_getter.begin(), weight_getter.end(), [node](const LoRAWeightGetter& getter) {
                     return bool(getter(node->get_friendly_name()));
             })) {
-                return std::nullopt;
+                //find matmul inputs name
+                if (!std::count_if(weight_getter.begin(), weight_getter.end(), [node](const LoRAWeightGetter& getter) {
+                        std::string name = node->get_friendly_name();
+
+                        if (node->description() == "MatMul") {
+                            auto weight = node->input_value(1).get_node_shared_ptr();
+                            name = weight->input_value(0).get_node_shared_ptr()->get_friendly_name();
+ 
+                            // change node name
+                            std::string name_add_lora = "_lora" + node->get_friendly_name();
+                            node->set_friendly_name(name_add_lora);
+                        }
+                        return bool(getter(name));
+                    })) {
+                    return std::nullopt;
+                }
             }
         } else {
             // Accumulates all ranks from all adapters applicable for a given node.
@@ -384,6 +399,13 @@ struct LoRAWeightStateGetter {
             deduce_input_output_dims(node, input_dim, output_dim);
 
             std::string name = node->get_friendly_name();
+          
+            //if matmul name has "_lora", change lora state name
+            std::string lora_pre = "_lora";
+            if (name.find(lora_pre) == 0) {
+                name = node->input_value(1).get_node_shared_ptr()->input_value(0).get_node_shared_ptr()->get_friendly_name();
+            }
+
             // FIXME: Potential name conflict if LoRA is applied multiple times by using this infrastructure independently each time (not a recommended approach).
             // TODO: Check for name collisions searching for existing variables with the same names.
             std::string variable_id_prefix = "lora_state_" + std::to_string(model->get_sinks().size()) + name;
@@ -491,6 +513,50 @@ private:
 
 };
 
+// Builds LoRA subgraph that consists of several matrix and element-wise multiplications with optional data type conversions and reshapes
+// to build a consistent graph.
+NodePtr tensors_multiplication_spec(NodePtr input, const NodeVector multipliers, ov::Output<ov::Node> target, bool transpose_weights, size_t alpha_pos, bool transpose_in_end) {
+    const auto target_type = target.get_element_type();
+    const auto target_shape = target.get_partial_shape();
+    const auto target_rank = target_shape.rank().get_length();
+    for(size_t i = 0; i < multipliers.size(); ++i) {
+        NodePtr normalized = multipliers[i];
+        if(normalized->get_output_element_type(0) != target_type) {
+            normalized = std::make_shared<v0::Convert>(normalized, target_type);
+            if(std::dynamic_pointer_cast<v0::Constant>(normalized)) {
+                input->get_rt_info()["decompression"];
+            }
+        }
+        if(normalized->get_output_partial_shape(0).rank().get_length() > 2) {
+            // FIXME: Any other shape patterns possible?
+            normalized = squeeze_2d(normalized);
+        }
+        if(input) {
+            if(i == alpha_pos || 2 == i) {
+                // TODO: Apply alpha multiplication separately
+                input = std::make_shared<v1::Multiply>(input, normalized);
+            } else {
+                input = std::make_shared<v0::MatMul>(input, normalized, /*transpose_a = */false, transpose_weights);  // FIXME: verify transpose_a == true
+            }
+        } else {
+            input = normalized;
+        }
+    }
+
+    if(transpose_in_end) {
+        // FIXME: Check the dimensions we really need to move, currently it is hardcoded 2 + 2 dimensions that usually appears in 2D Convolution case
+        // where we need to apply LoRA for the first two dimensions (channels) while interpreting two last dimensions (spatial )
+        // TODO: Stash transposition constant to reuse
+        auto transposition = v0::Constant::create(ov::element::i32, ov::Shape{4}, std::vector<int>{2, 3, 0, 1});
+        input = std::make_shared<v1::Transpose>(input, transposition);
+    } else if(input->get_output_partial_shape(0).rank().get_length() != target_rank) {
+        input = unsqueeze(input, target_rank);
+    }
+
+    input = std::make_shared<v1::Add>(target, input);
+
+    return input;
+}
 
 // Builds LoRA subgraph that consists of several matrix and element-wise multiplications with optional data type conversions and reshapes
 // to build a consistent graph.
@@ -768,9 +834,26 @@ public:
             transpose_in_end = true;
         }
 
-        NodeVector lora_variables{lora_weight.A, lora_weight.alpha, lora_weight.B};
-        replacement = tensors_multiplication(activations.get_node_shared_ptr(), lora_variables, target, true, 1, transpose_in_end);
+        std::string lora_pre = "_lora";
+        std::string name = node->get_friendly_name();
+        if (name.find(lora_pre) == 0) {
+            // modified node name to origin name
+            std::string sub_name = name.erase(0, lora_pre.length());
+            node->set_friendly_name(sub_name);
+            NodePtr beta = node->input_value(1).get_node_shared_ptr()->input_value(1).get_node_shared_ptr();
+            NodeVector lora_variables{lora_weight.A, lora_weight.alpha, beta, lora_weight.B};
+            replacement = tensors_multiplication_spec(activations.get_node_shared_ptr(),
+                                                      lora_variables,
+                                                      target,
+                                                      true,
+                                                      1,
+                                                      transpose_in_end);
 
+        } else {
+            NodeVector lora_variables{lora_weight.A, lora_weight.alpha, lora_weight.B};
+            replacement = tensors_multiplication(activations.get_node_shared_ptr(), lora_variables, target, true, 1, transpose_in_end);
+        }
+        
         replacement->get_output_tensor(0).add_names(target.get_names());
         for (auto consumer : consumers) {
             consumer.replace_source_output(replacement->output(0));
