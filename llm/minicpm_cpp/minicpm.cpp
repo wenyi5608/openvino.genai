@@ -458,6 +458,9 @@ int main(int argc, char* argv[]) try {
         return 0;
     }
 
+    //disable kvcache compression
+    core.set_property(device, ov::hint::kv_cache_precision(ov::element::undefined));
+ 
     //Compile model
     startTime = Time::now();
     ov::CompiledModel compilemodel = core.compile_model(args.ov_model_path, device, device_config);
